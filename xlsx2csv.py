@@ -49,7 +49,7 @@ FORMATS = {
   'mm/dd/yyyy hh:mm:ss' : 'date',
   'yyyy-mm-dd hh:mm:ss' : 'date',
 }
-STANDARD_FORMATS = { 
+STANDARD_FORMATS = {
   0 : 'general',
   1 : '0',
   2 : '0.00',
@@ -110,12 +110,12 @@ def xlsx2csv(infilepath, outfile, sheetid=1, dateformat=None, delimiter=",", she
             sheet.to_csv(writer)
         else:
             for s in workbook.sheets:
-                if sheetdelimiter != "":
-                    outfile.write(sheetdelimiter + " " + str(s['id']) + " - " + s['name'].encode('utf-8') + "\r\n")
                 sheet = Sheet(workbook, shared_strings, styles, ziphandle.read("xl/worksheets/sheet%i.xml" %s['id']))
                 sheet.set_dateformat(dateformat)
                 sheet.set_skip_empty_lines(skip_empty_lines)
                 sheet.to_csv(writer)
+                if sheetdelimiter != "" and s['id'] < workbook.sheets.count:
+                    outfile.write(sheetdelimiter + "\r\n")
     finally:
         ziphandle.close()
 
@@ -404,7 +404,7 @@ if __name__ == "__main__":
         else:
             parser.print_help()
     else:
-        if len(args) < 1: 
+        if len(args) < 1:
             parser.print_help()
         else:
             if len(args) > 1:
