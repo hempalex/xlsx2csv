@@ -110,6 +110,7 @@ def xlsx2csv(infilepath, outfile, sheetid=1, dateformat=None, delimiter=",", she
             sheet.to_csv(writer)
         else:
             for s in workbook.sheets:
+                outfile.write(sheetdelimiter + "\r\n")
                 sheet = Sheet(workbook, shared_strings, styles, ziphandle.read("xl/worksheets/sheet%i.xml" %s['id']))
                 sheet.set_dateformat(dateformat)
                 sheet.set_skip_empty_lines(skip_empty_lines)
@@ -195,9 +196,9 @@ class SharedStrings:
     def handleStartElement(self, name, attrs):
         if name == 'si':
             self.si = True
+            self.value = ""
         elif name == 't' and self.si:
             self.t = True
-            self.value = ""
 
     def handleEndElement(self, name):
         if name == 'si':
@@ -390,10 +391,16 @@ if __name__ == "__main__":
     else:
         raise Exception("Invalid delimiter")
 
+    if options.sheetdelimiter[0] == 'x' and len(options.sheetdelimiter) > 1:
+        sheetdelimiter = chr(int(options.sheetdelimiter[1:]))
+    else:
+        sheetdelimiter = options.sheetdelimiter
+
+
     kwargs = {
       'sheetid' : options.sheetid,
       'delimiter' : delimiter,
-      'sheetdelimiter' : options.sheetdelimiter,
+      'sheetdelimiter' : sheetdelimiter,
       'dateformat' : options.dateformat,
       'skip_empty_lines' : options.skip_empty_lines
     }
