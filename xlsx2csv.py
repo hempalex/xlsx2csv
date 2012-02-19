@@ -101,7 +101,7 @@ def xlsx2csv(infilepath, outfile, sheetid=1, dateformat=None, delimiter=",", she
             sheet = None
             for s in workbook.sheets:
                 if s['id'] == sheetid:
-                    sheet = Sheet(workbook, shared_strings, styles, ziphandle.read("xl/worksheets/sheet%i.xml" %s['id']))
+                    sheet = Sheet(workbook, shared_strings, styles, ziphandle.read("xl/worksheets/sheet%i.xml" % s['id']))
                     break
             if not sheet:
                 raise Exception("Sheet %i Not Found" %sheetid)
@@ -110,11 +110,11 @@ def xlsx2csv(infilepath, outfile, sheetid=1, dateformat=None, delimiter=",", she
             sheet.to_csv(writer)
         else:
             for s in workbook.sheets:
-                sheet = Sheet(workbook, shared_strings, styles, ziphandle.read("xl/worksheets/sheet%i.xml" %s['id']))
+                sheet = Sheet(workbook, shared_strings, styles, ziphandle.read("xl/worksheets/sheet%i.xml" % s['id']))
                 sheet.set_dateformat(dateformat)
                 sheet.set_skip_empty_lines(skip_empty_lines)
                 sheet.to_csv(writer)
-                if sheetdelimiter != "" and s['id'] < workbook.sheets.count:
+                if sheetdelimiter != "" and s['id'] < len(workbook.sheets):
                     outfile.write(sheetdelimiter + "\r\n")
     finally:
         ziphandle.close()
