@@ -1,7 +1,26 @@
 #!/usr/bin/env python
+#
+#   Copyright information
+#
+#	Copyright (C) 2010-2012 Dilshod Temirkhodjaev <tdilshod@gmail.com>
+#
+#   License
+#
+#	This program is free software; you can redistribute it and/or modify
+#	it under the terms of the GNU General Public License as published by
+#	the Free Software Foundation; either version 2 of the License, or
+#	(at your option) any later version.
+#
+#	This program is distributed in the hope that it will be useful,
+#	but WITHOUT ANY WARRANTY; without even the implied warranty of
+#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+#	GNU General Public License for more details.
+#
+#	You should have received a copy of the GNU General Public License
+#	along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 __author__ = "Dilshod Temirkhodjaev <tdilshod@gmail.com>"
-__license__ = "GPL"
+__license__ = "GPL-2+"
 
 import csv, datetime, zipfile, sys, os
 import xml.parsers.expat
@@ -46,6 +65,7 @@ FORMATS = {
   'm/d/yy' : 'date',
   'm/d/yyyy' : 'date',
   'dd-mmm-yyyy' : 'date',
+  'dd/mm/yyyy' : 'date',
   'mm/dd/yy hh:mm am/pm' : 'date',
   'mm/dd/yyyy hh:mm:ss' : 'date',
   'yyyy-mm-dd hh:mm:ss' : 'date',
@@ -366,7 +386,7 @@ def convert_recursive(path, kwargs):
             if fullpath.lower().endswith(".xlsx"):
                 outfilepath = fullpath[:-4] + 'csv'
                 print("Converting %s to %s" %(fullpath, outfilepath))
-                f = open(outfilepath, 'w+')
+                f = open(outfilepath, 'w+b')
                 try:
                     xlsx2csv(fullpath, f, **kwargs)
                 except zipfile.BadZipfile:
@@ -375,18 +395,18 @@ def convert_recursive(path, kwargs):
 
 if __name__ == "__main__":
     parser = OptionParser(usage = "%prog [options] infile [outfile]", version="0.11")
-    parser.add_option("-s", "--sheet", dest="sheetid", default=1, type="int",
-      help="sheet no to convert (0 for all sheets)")
     parser.add_option("-d", "--delimiter", dest="delimiter", default=",",
       help="delimiter - csv columns delimiter, 'tab' or 'x09' for tab (comma is default)")
-    parser.add_option("-p", "--sheetdelimiter", dest="sheetdelimiter", default="--------",
-      help="sheets delimiter used to separate sheets, pass '' if you don't want delimiters (default '--------')")
     parser.add_option("-f", "--dateformat", dest="dateformat",
       help="override date/time format (ex. %Y/%m/%d)")
     parser.add_option("-i", "--ignoreempty", dest="skip_empty_lines", default=False, action="store_true",
       help="skip empty lines")
+    parser.add_option("-p", "--sheetdelimiter", dest="sheetdelimiter", default="--------",
+      help="sheets delimiter used to separate sheets, pass '' if you don't want delimiters (default '--------')")
     parser.add_option("-r", "--recursive", dest="recursive", default=False, action="store_true",
       help="convert recursively")
+    parser.add_option("-s", "--sheet", dest="sheetid", default=1, type="int",
+      help="sheet no to convert (0 for all sheets)")
 
     (options, args) = parser.parse_args()
 
@@ -419,7 +439,7 @@ if __name__ == "__main__":
             parser.print_help()
         else:
             if len(args) > 1:
-                outfile = open(args[1], 'w+')
+                outfile = open(args[1], 'w+b')
                 xlsx2csv(args[0], outfile, **kwargs)
                 outfile.close()
             else:
