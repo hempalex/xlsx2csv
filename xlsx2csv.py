@@ -2,28 +2,28 @@
 #
 #   Copyright information
 #
-#	Copyright (C) 2010-2012 Dilshod Temirkhodjaev <tdilshod@gmail.com>
+# Copyright (C) 2010-2012 Dilshod Temirkhodjaev <tdilshod@gmail.com>
 #
 #   License
 #
-#	This program is free software; you can redistribute it and/or modify
-#	it under the terms of the GNU General Public License as published by
-#	the Free Software Foundation; either version 2 of the License, or
-#	(at your option) any later version.
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
 #
-#	This program is distributed in the hope that it will be useful,
-#	but WITHOUT ANY WARRANTY; without even the implied warranty of
-#	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#	GNU General Public License for more details.
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
 #
-#	You should have received a copy of the GNU General Public License
-#	along with this program. If not, see <http://www.gnu.org/licenses/>.
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 __author__ = "Dilshod Temirkhodjaev <tdilshod@gmail.com>"
 __license__ = "GPL-2+"
-__version__ = "0.6"
+__version__ = "0.7.2"
 
-import csv, datetime, zipfile, string, sys, os, re
+import csv, datetime, zipfile, string, sys, os, re, signal
 import xml.parsers.expat
 from xml.dom import minidom
 try:
@@ -76,9 +76,14 @@ FORMATS = {
   'm/d/yyyy' : 'date',
   'dd-mmm-yyyy' : 'date',
   'dd/mm/yyyy' : 'date',
-  'mm/dd/yy hh:mm am/pm' : 'date',
+  'mm/dd/yy h:mm am/pm' : 'date',
+  'mm/dd/yy hh:mm' : 'date',
+  'mm/dd/yyyy h:mm am/pm' : 'date',
   'mm/dd/yyyy hh:mm:ss' : 'date',
   'yyyy-mm-dd hh:mm:ss' : 'date',
+  '#,##0;(#,##0)' : 'float',
+  '_(* #,##0_);_(* (#,##0);_(* "-"??_);_(@_)' : 'float',
+  '_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)' : 'float'
 }
 STANDARD_FORMATS = {
   0 : 'general',
@@ -126,35 +131,39 @@ class OutFileAlreadyExistsException(XlsxException):
 class Xlsx2csv:
     """
      Usage: Xlsx2csv("test.xslx", **params).convert("test.csv", sheetid=1)
+     Input:
+       xlsxfile - path to file or filehandle
      options:
        sheetid - sheet no to convert (0 for all sheets)
        dateformat - override date/time format
        delimiter - csv columns delimiter symbol
        sheetdelimiter - sheets delimiter used when processing all sheets
        skip_empty_lines - skip empty lines
+       skip_trailing_columns - skip trailing columns
        hyperlinks - include hyperlinks
        include_sheet_pattern - only include sheets named matching given pattern
        exclude_sheet_pattern - exclude sheets named matching given pattern
     """
 
     def __init__(self, xlsxfile, **options):
-        # dateformat=None, delimiter=",", sheetdelimiter="--------", skip_empty_lines=False, escape_strings=False, cmd=False
-        options.setdefault("delimeter", ",")
+        options.setdefault("delimiter", ",")
         options.setdefault("sheetdelimiter", "--------")
+        options.setdefault("dateformat", None)
         options.setdefault("skip_empty_lines", False)
+        options.setdefault("skip_trailing_columns", False)
         options.setdefault("escape_strings", False)
-        options.setdefault("cmd", False)
-        options.setdefault("include_sheet_pattern", "^.*$")
-        options.setdefault("exclude_sheet_pattern", "")
+        options.setdefault("hyperlinks", False)
+        options.setdefault("include_sheet_pattern", ["^.*$"])
+        options.setdefault("exclude_sheet_pattern", [])
+        options.setdefault("merge_cells", False)
+        options.setdefault("ignore_formats", [''])
+
 
         self.options = options
         try:
             self.ziphandle = zipfile.ZipFile(xlsxfile)
         except (zipfile.BadZipfile, IOError):
-            if self.options['cmd']:
-                sys.stderr.write("Invalid xlsx file: " + xlsxfile + os.linesep)
-                sys.exit(1)
-            raise InvalidXlsxFileException("Invalid xlsx file: " + xlsxfile)
+            raise InvalidXlsxFileException("Invalid xlsx file: " + str(xlsxfile))
 
         self.py3 = sys.version_info[0] == 3
 
@@ -165,6 +174,12 @@ class Xlsx2csv:
         if self.options['escape_strings']:
             self.shared_strings.escape_strings()
 
+    def getSheetIdByName(self, name):
+        for s in self.workbook.sheets:
+            if s['name'] == name:
+                return s['id']
+        return None
+
     def convert(self, outfile, sheetid=1):
         """outfile - path to file or filehandle"""
         if sheetid > 0:
@@ -174,21 +189,33 @@ class Xlsx2csv:
                 if not os.path.exists(outfile):
                     os.makedirs(outfile)
                 elif os.path.isfile(outfile):
-                    if self.options['cmd']:
-                        sys.stderr.write("File " + outfile + " already exists!" + os.linesep)
-                        sys.exit(1)
-                    raise OutFileAlreadyExistsException("File " + outfile + " already exists!")
+                    raise OutFileAlreadyExistsException("File " + str(outfile) + " already exists!")
             for s in self.workbook.sheets:
                 sheetname = s['name']
 
-                include_sheet_pattern = self.options['include_sheet_pattern']
                 # filter sheets by include pattern
-                if len(include_sheet_pattern) > 0 and not re.match(include_sheet_pattern, sheetname):
-                    continue
+                include_sheet_pattern = self.options['include_sheet_pattern']
+                if type(include_sheet_pattern) == type(""): # optparser lib fix
+                    include_sheet_pattern = [include_sheet_pattern]
+                if len(include_sheet_pattern) > 0:
+                    include = False
+                    for pattern in include_sheet_pattern:
+                        include = pattern and len(pattern) > 0 and re.match(pattern, sheetname)
+                        if include:
+                            break
+                    if not include:
+                        continue
 
-                exclude_sheet_pattern = self.options['exclude_sheet_pattern']
                 # filter sheets by exclude pattern
-                if len(exclude_sheet_pattern) > 0 and re.match(exclude_sheet_pattern, sheetname):
+                exclude_sheet_pattern = self.options['exclude_sheet_pattern']
+                if type(exclude_sheet_pattern) == type(""): # optparser lib fix
+                    exclude_sheet_pattern = [exclude_sheet_pattern]
+                exclude = False
+                for pattern in exclude_sheet_pattern:
+                    exclude = pattern and len(pattern) > 0 and re.match(pattern, sheetname)
+                    if exclude:
+                        break
+                if exclude:
                     continue
 
                 if not self.py3:
@@ -196,32 +223,39 @@ class Xlsx2csv:
                 of = outfile
                 if isinstance(outfile, str):
                     of = os.path.join(outfile, sheetname + '.csv')
-                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and s['id'] > 1:
-                    of.write(self.options['sheetdelimiter'] + os.linesep)
+                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']):
+                    of.write(self.options['sheetdelimiter'] + " " + str(s['id']) + " - " + sheetname + self.options['lineterminator'])
                 self._convert(s['id'], of)
-
 
     def _convert(self, sheetid, outfile):
         closefile = False
         if isinstance(outfile, str):
-            outfile = open(outfile, 'w+')
+            if sys.version_info[0] == 2:
+                outfile = open(outfile, 'wb+')
+            elif sys.version_info[0] == 3:
+                outfile = open(outfile, 'w+', encoding=self.options['outputencoding'], newline="")
+            else:
+                sys.stderr.write("error: version of your python is not supported: " + str(sys.version_info) + "\n")
+                sys.exit(1)
             closefile = True
         try:
-            writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, delimiter=self.options['delimiter'], lineterminator=os.linesep)
+            writer = csv.writer(outfile, quoting=csv.QUOTE_MINIMAL, delimiter=self.options['delimiter'], lineterminator=self.options['lineterminator'])
             sheetfile = self._filehandle("xl/worksheets/sheet%i.xml" % sheetid)
             if not sheetfile and sheetid == 1:
                 sheetfile = self._filehandle("xl/worksheets/sheet.xml")
             if not sheetfile:
-                if self.options['cmd']:
-                    sys.stderr.write("Sheet %s not found!%s" %(sheetid, os.linesep))
-                    sys.exit(1)
                 raise SheetNotFoundException("Sheet %s not found" %sheetid)
             try:
                 sheet = Sheet(self.workbook, self.shared_strings, self.styles, sheetfile)
                 sheet.relationships = self._parse(Relationships, "xl/worksheets/_rels/sheet%i.xml.rels" % sheetid)
                 sheet.set_dateformat(self.options['dateformat'])
                 sheet.set_skip_empty_lines(self.options['skip_empty_lines'])
+                sheet.set_skip_trailing_columns(self.options['skip_trailing_columns'])
                 sheet.set_include_hyperlinks(self.options['hyperlinks'])
+                sheet.set_merge_cells(self.options['merge_cells'])
+                sheet.set_ignore_formats(self.options['ignore_formats'])
+                if self.options['escape_strings']:
+                    sheet.filedata = re.sub(r"(<v>[^<>]+)&#10;([^<>]+</v>)", r"\1\\n\2", re.sub(r"(<v>[^<>]+)&#9;([^<>]+</v>)", r"\1\\t\2", re.sub(r"(<v>[^<>]+)&#13;([^<>]+</v>)", r"\1\\r\2", sheet.filedata)))
                 sheet.to_csv(writer)
             finally:
                 sheetfile.close()
@@ -259,10 +293,14 @@ class Workbook:
         if len(fileVersion) == 0:
             self.appName = 'unknown'
         else:
-            if workbookDoc.firstChild.namespaceURI:
-                self.appName = workbookDoc.firstChild.getElementsByTagNameNS(workbookDoc.firstChild.namespaceURI, "fileVersion")[0]._attrs['appName'].value
-            else:
-                self.appName = workbookDoc.firstChild.getElementsByTagName("fileVersion")[0]._attrs['appName'].value
+            try:
+                if workbookDoc.firstChild.namespaceURI:
+                    self.appName = workbookDoc.firstChild.getElementsByTagNameNS(workbookDoc.firstChild.namespaceURI, "fileVersion")[0]._attrs['appName'].value
+                else:
+                    self.appName = workbookDoc.firstChild.getElementsByTagName("fileVersion")[0]._attrs['appName'].value
+            except KeyError:
+                # no app name
+                self.appName = 'unknown'
         try:
             if workbookDoc.firstChild.namespaceURI:
                 self.date1904 = workbookDoc.firstChild.getElementsByTagNameNS(workbookDoc.firstChild.namespaceURI, "workbookPr")[0]._attrs['date1904'].value.lower().strip() != "false"
@@ -282,7 +320,7 @@ class Workbook:
         for sheetNode in sheetNodes:
             attrs = sheetNode._attrs
             name = attrs["name"].value
-            if self.appName == 'xl':
+            if self.appName == 'xl' and len(attrs["r:id"].value) > 2:
                 if 'r:id' in attrs: id = int(attrs["r:id"].value[3:])
                 else: id = int(attrs['sheetId'].value)
             else:
@@ -314,7 +352,7 @@ class Relationships:
                 target = attrs.get('Target')
                 self.relationships[str(rId.value)] = {
                     "type" : vtype and str(vtype.value) or None,
-                    "target" : target and str(target.value) or None
+                    "target" : target and target.value.encode("utf-8") or None
                 }
 
 class Styles:
@@ -375,6 +413,11 @@ class SharedStrings:
             self.value+= data
 
     def handleStartElement(self, name, attrs):
+        # ignore namespace
+        i = name.find(":")
+        if i >= 0:
+            name = name[i + 1:]
+
         if name == 'si':
             self.si = True
             self.value = ""
@@ -386,6 +429,11 @@ class SharedStrings:
             self.rPh = True
 
     def handleEndElement(self, name):
+        # ignore namespace
+        i = name.find(":")
+        if i >= 0:
+            name = name[i + 1:]
+
         if name == 'si':
             self.si = False
             self.strings.append(self.value)
@@ -408,17 +456,19 @@ class Sheet:
         self.in_row = False
         self.in_cell = False
         self.in_cell_value = False
-        self.in_cell_formula = False
 
         self.columns = {}
+        self.lastRowNum = 0
         self.rowNum = None
         self.colType = None
         self.cellId = None
         self.s_attr = None
         self.data = None
+        self.max_columns = -1
 
         self.dateformat = None
         self.skip_empty_lines = False
+        self.skip_trailing_columns = False
 
         self.filedata = None
         self.filehandle = filehandle
@@ -427,12 +477,59 @@ class Sheet:
         self.styles = styles
 
         self.hyperlinks = {}
+        self.mergeCells = {}
+        self.ignore_formats = []
 
     def set_dateformat(self, dateformat):
         self.dateformat = dateformat
 
     def set_skip_empty_lines(self, skip):
         self.skip_empty_lines = skip
+
+    def set_skip_trailing_columns(self, skip):
+        self.skip_trailing_columns = skip
+
+    def set_ignore_formats(self, ignore_formats):
+        self.ignore_formats = ignore_formats
+
+    def set_merge_cells(self, mergecells):
+        if not mergecells:
+            return
+        if not self.filedata:
+            self.filedata = self.filehandle.read()
+        data = str(self.filedata) # python3: convert byte buffer to string
+
+        # find worksheet tag, we need namespaces from it
+        start = data.find("<worksheet")
+        if start < 0:
+            return
+        end = data.find(">", start)
+        worksheet = data[start : end + 1]
+
+        # find hyperlinks part
+        start = data.find("<mergeCells")
+        if start < 0:
+            # hyperlinks not found
+            return
+        end = data.find("</mergeCells>")
+        data = data[start : end + 13]
+
+        # parse hyperlinks
+        doc = minidom.parseString(worksheet + data + "</worksheet>").firstChild
+
+        if doc.namespaceURI:
+            mergeCells = doc.getElementsByTagNameNS(doc.namespaceURI, "mergeCell")
+        else:
+            mergeCells = doc.getElementsByTagName("mergeCell")
+        for mergeCell in mergeCells:
+            attrs = mergeCell._attrs
+            if 'ref' in attrs.keys():
+                rangeStr = attrs['ref'].value
+                rng = rangeStr.split(":")
+                if len(rng) > 1:
+                    for cell in self._range(rangeStr):
+                        self.mergeCells[cell] = {}
+                        self.mergeCells[cell]['copyFrom'] = rng[0]
 
     def set_include_hyperlinks(self, hyperlinks):
         if not hyperlinks or not self.relationships or not self.relationships.relationships:
@@ -503,27 +600,28 @@ class Sheet:
                 s = int(self.s_attr)
 
                 # get cell format
-                format = None
+                format_str = None
                 xfs_numfmt = self.styles.cellXfs[s]
                 if xfs_numfmt in self.styles.numFmts:
-                    format = self.styles.numFmts[xfs_numfmt]
+                    format_str = self.styles.numFmts[xfs_numfmt]
                 elif xfs_numfmt in STANDARD_FORMATS:
-                    format = STANDARD_FORMATS[xfs_numfmt]
+                    format_str = STANDARD_FORMATS[xfs_numfmt]
                 # get format type
-                if not format:
+                if not format_str:
+                    print("unknown format %s at %d" %(format_str,xfs_numfmt))
                     return
                 format_type = None
-                if format in FORMATS:
-                    format_type = FORMATS[format]
-                elif re.match("^\d+(\.\d+)?$", self.data) and re.match(".*[hsmdyY]$", format) and not re.match('.*\[.*[dmhys].*\]', format):
+                if format_str in FORMATS:
+                    format_type = FORMATS[format_str]
+                elif re.match("^\d+(\.\d+)?$", self.data) and re.match(".*[hsmdyY]$", format_str) and not re.match('.*\[.*[dmhys].*\]', format_str):
                     # it must be date format
                     if float(self.data) < 1:
                         format_type = "time"
                     else:
                         format_type = "date"
-                elif re.match("^\d", self.data):
+                elif re.match("^-?\d+(.\d+)?$", self.data):
                     format_type = "float"
-                if format_type:
+                if format_type and not format_type in self.ignore_formats :
                     try:
                         if format_type == 'date': # date/time
                             if self.workbook.date1904:
@@ -535,27 +633,29 @@ class Sheet:
                                 self.data = date.strftime(str(self.dateformat))
                             else:
                                 # ignore ";@", don't know what does it mean right now
-                                dateformat = format.replace(";@", ""). \
+                                # ignore "[$-409]" and similar format codes
+                                dateformat = re.sub(r"\[\$\-\d{1,3}\]", "", format_str, 1). \
+                                  replace(";@", ""). \
                                   replace("yyyy", "%Y").replace("yy", "%y"). \
-                                  replace("hh:mm", "%H:%M").replace("h", "%H").replace("%H%H", "%H").replace("ss", "%S"). \
-                                  replace("d", "%e").replace("%e%e", "%d"). \
-                                  replace("mmmm", "%B").replace("mmm", "%b").replace(":mm", ":%M").replace("m", "%m").replace("%m%m", "%m"). \
-                                  replace("am/pm", "%p")
+                                  replace("hh:mm", "%H:%M").replace("h", "%I").replace("%H%H", "%H").replace("ss", "%S"). \
+                                  replace("dd", "d").replace("d", "%d"). \
+                                  replace("am/pm", "%p"). \
+                                  replace("mmmm", "%B").replace("mmm", "%b").replace(":mm", ":%M").replace("m", "%m").replace("%m%m", "%m")
                                 self.data = date.strftime(str(dateformat)).strip()
                         elif format_type == 'time': # time
-                            t = int(float(self.data) * 24*60)
+                            t = int(round((float(self.data)%1) * 24*60*60, 6)) / 60 # round to microseconds
                             self.data = "%.2i:%.2i" %(t / 60, t % 60)  #str(t / 60) + ":" + ('0' + str(t % 60))[-2:]
                         elif format_type == 'float' and ('E' in self.data or 'e' in self.data):
                             self.data = ("%f" %(float(self.data))).rstrip('0').rstrip('.')
-                        elif format_type == 'float' and format[0:3] == '0.0':
-                            self.data = ("%." + str(len(format.split(".")[1])) + "f") % float(self.data)
+                        elif format_type == 'float' and format_str[0:3] == '0.0':
+                            L = len(format_str.split(".")[1])
+                            if '%' in format_str:
+                                L += 1
+                            self.data = ("%." + str(L) + "f") % float(self.data)
 
                     except (ValueError, OverflowError):
                         # invalid date format
                         pass
-        # does not support it
-        #elif self.in_cell_formula:
-        #    self.formula = data
 
     def handleStartElement(self, name, attrs):
         has_namespace = name.find(":") > 0
@@ -568,14 +668,11 @@ class Sheet:
                 self.colIndex = 0
             else:
                 self.colIndex+= 1
-            #self.formula = None
             self.data = ""
             self.in_cell = True
         elif self.in_cell and ((name == 'v' or name == 'is') or (has_namespace and (name.endswith(':v') or name.endswith(':is')))):
             self.in_cell_value = True
             self.collected_string = ""
-        #elif self.in_cell and name == 'f':
-        #    self.in_cell_formula = True
         elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and ('r' in attrs):
             self.rowNum = attrs['r']
             self.in_row = True
@@ -583,27 +680,25 @@ class Sheet:
             self.spans = None
             if 'spans' in attrs:
                 self.spans = [int(i) for i in attrs['spans'].split(":")]
+
         elif name == 'sheetData' or (has_namespace and name.endswith(':sheetData')):
             self.in_sheet = True
         elif name == 'dimension':
             rng = attrs.get("ref").split(":")
             if len(rng) > 1:
                 start = re.match("^([A-Z]+)(\d+)$", rng[0])
-                end = re.match("^([A-Z]+)(\d+)$", rng[1])
-                startCol = start.group(1)
-                #startRow = int(start.group(2))
-                endCol = end.group(1)
-                #endRow = int(end.group(2))
-                self.columns_count = 0
-                for cell in self._range(startCol + "1:" + endCol + "1"):
-                    self.columns_count+= 1
+                if (start):
+                    end = re.match("^([A-Z]+)(\d+)$", rng[1])
+                    startCol = start.group(1)
+                    endCol = end.group(1)
+                    self.columns_count = 0
+                    for cell in self._range(startCol + "1:" + endCol + "1"):
+                        self.columns_count+= 1
 
     def handleEndElement(self, name):
         has_namespace = name.find(":") > 0
         if self.in_cell and name == 'v':
             self.in_cell_value = False
-        #elif self.in_cell and name == 'f':
-        #    self.in_cell_formula = False
         elif self.in_cell and (name == 'c' or (has_namespace and name.endswith(':c'))):
             t = 0
             for i in self.colNum: t = t*26 + ord(i) - 64
@@ -611,9 +706,17 @@ class Sheet:
             if self.hyperlinks:
                 hyperlink = self.hyperlinks.get(self.cellId)
                 if hyperlink:
+                    if self.py3:
+                        hyperlink = hyperlink.decode("utf-8")
                     d = "<a href='" + hyperlink + "'>" + d + "</a>"
+            if self.colNum + self.rowNum in self.mergeCells.keys():
+                if 'copyFrom' in self.mergeCells[self.colNum + self.rowNum].keys() and self.mergeCells[self.colNum + self.rowNum]['copyFrom'] == self.colNum + self.rowNum:
+                    self.mergeCells[self.colNum + self.rowNum]['value'] = d
+                else:
+                    d = self.mergeCells[self.mergeCells[self.colNum + self.rowNum]['copyFrom']]['value']
+
             self.columns[t - 1 + self.colIndex] = d
-            self.in_cell = False
+
         if self.in_row and (name == 'row' or (has_namespace and name.endswith(':row'))):
             if len(self.columns.keys()) > 0:
                 d = [""] * (max(self.columns.keys()) + 1)
@@ -626,11 +729,28 @@ class Sheet:
                     l = self.spans[0] + self.spans[1] - 1
                     if len(d) < l:
                         d+= (l - len(d)) * ['']
+
+                # write empty lines
+                if not self.skip_empty_lines:
+                    for i in range(self.lastRowNum, int(self.rowNum) - 1):
+                        self.writer.writerow([])
+                    self.lastRowNum = int(self.rowNum)
+
                 # write line to csv
                 if not self.skip_empty_lines or d.count('') != len(d):
                     while len(d) < self.columns_count:
                         d.append("")
+
+                    if self.skip_trailing_columns:
+                        if self.max_columns < 0:
+                            self.max_columns = len(d)
+                            while len(d) > 0 and d[-1] == "":
+                                d = d[0:-1]
+                                self.max_columns = self.max_columns - 1
+                        elif self.max_columns > 0:
+                            d = d[0:self.max_columns]
                     self.writer.writerow(d)
+
             self.in_row = False
         elif self.in_sheet and (name == 'sheetData' or (has_namespace and name.endswith(':sheetData'))):
             self.in_sheet = False
@@ -665,16 +785,12 @@ class Sheet:
 
 
 def convert_recursive(path, sheetid, outfile, kwargs):
-    kwargs['cmd'] = False
     for name in os.listdir(path):
         fullpath = os.path.join(path, name)
         if os.path.isdir(fullpath):
             convert_recursive(fullpath, sheetid, outfile, kwargs)
         else:
-            # strange code, python2.4 fix
-            #outfilepath = outfile if len(outfile) > 0 else ""
             outfilepath = outfile
-
             if len(outfilepath) == 0 and fullpath.lower().endswith(".xlsx"):
                 outfilepath = fullpath[:-4] + 'csv'
 
@@ -685,37 +801,62 @@ def convert_recursive(path, sheetid, outfile, kwargs):
                 print("File %s is not a zip file" %fullpath)
 
 if __name__ == "__main__":
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+        signal.signal(signal.SIGINT, signal.SIG_DFL)
+    except AttributeError:
+        pass
+
     if "ArgumentParser" in globals():
         parser = ArgumentParser(description = "xlsx to csv converter")
         parser.add_argument('infile', metavar='xlsxfile', help="xlsx file path")
         parser.add_argument('outfile', metavar='outfile', nargs='?', help="output csv file path")
-        parser.add_argument('-v', '--version', action='version', version='%(prog)s')
+        parser.add_argument('-v', '--version', action='version', version=__version__)
+        nargs_plus = "+"
         argparser = True
     else:
         parser = OptionParser(usage = "%prog [options] infile [outfile]", version=__version__)
         parser.add_argument = parser.add_option
+        nargs_plus = 1
         argparser = False
 
+
+    if sys.version_info[0] == 2 and sys.version_info[1] < 5:
+        inttype = "int"
+    else:
+        inttype = int
     parser.add_argument("-a", "--all", dest="all", default=False, action="store_true",
       help="export all sheets")
+    parser.add_argument("-c", "--outputencoding", dest="outputencoding", default="utf-8", action="store",
+      help="encoding of output csv ** Python 3 only ** (default: utf-8)")
     parser.add_argument("-d", "--delimiter", dest="delimiter", default=",",
       help="delimiter - columns delimiter in csv, 'tab' or 'x09' for a tab (default: comma ',')")
-    parser.add_argument("-f", "--dateformat", dest="dateformat",
-      help="override date/time format (ex. %%Y/%%m/%%d)")
-    parser.add_argument("-i", "--ignoreempty", dest="skip_empty_lines", default=False, action="store_true",
-      help="skip empty lines")
-    parser.add_argument("-e", "--escape", dest='escape_strings', default=False, action="store_true",
-      help="Escape \\r\\n\\t characters")
-    parser.add_argument("-p", "--sheetdelimiter", dest="sheetdelimiter", default="--------",
-      help="sheet delimiter used to separate sheets, pass '' if you do not need delimiter (default: '--------')")
-    parser.add_argument("-s", "--sheet", dest="sheetid", default=1, type=int,
-      help="sheet number to convert")
     parser.add_argument("--hyperlinks", "--hyperlinks", dest="hyperlinks", action="store_true", default=False,
       help="include hyperlinks")
-    parser.add_argument("-I", "--include_sheet_pattern", dest="include_sheet_pattern", default="^.*$",
-      help="only include sheets named matching given pattern, only effects when -a option is enabled.")
-    parser.add_argument("-E", "--exclude_sheet_pattern", dest="exclude_sheet_pattern", default="",
+    parser.add_argument("-e", "--escape", dest='escape_strings', default=False, action="store_true",
+      help="Escape \\r\\n\\t characters")
+    parser.add_argument("-E", "--exclude_sheet_pattern", nargs=nargs_plus, dest="exclude_sheet_pattern", default="",
       help="exclude sheets named matching given pattern, only effects when -a option is enabled.")
+    parser.add_argument("-f", "--dateformat", dest="dateformat",
+      help="override date/time format (ex. %%Y/%%m/%%d)")
+    parser.add_argument("-I", "--include_sheet_pattern", nargs=nargs_plus, dest="include_sheet_pattern", default="^.*$",
+      help="only include sheets named matching given pattern, only effects when -a option is enabled.")
+    parser.add_argument("-if", "--ignore-formats", nargs=nargs_plus, type=str, dest="ignore_formats", default=[''],
+      help="Ignores format for specific data types.")
+    parser.add_argument("-l", "--lineterminator", dest="lineterminator", default="\n",
+      help="line terminator - lines terminator in csv, '\\n' '\\r\\n' or '\\r' (default: \\n)")
+    parser.add_argument("-m", "--merge-cells", dest="merge_cells", default=False, action="store_true",
+      help="merge cells")
+    parser.add_argument("-n", "--sheetname", dest="sheetname", default=None,
+      help="sheet name to convert")
+    parser.add_argument("-i", "--ignoreempty", dest="skip_empty_lines", default=False, action="store_true",
+      help="skip empty lines")
+    parser.add_argument("--skipemptycolumns", dest="skip_trailing_columns", default=False, action="store_false",
+      help="skip trailing empty columns")
+    parser.add_argument("-p", "--sheetdelimiter", dest="sheetdelimiter", default="--------",
+      help="sheet delimiter used to separate sheets, pass '' if you do not need delimiter, or 'x07' or '\\f' for form feed (default: '--------')")
+    parser.add_argument("-s", "--sheet", dest="sheetid", default=1, type=inttype,
+      help="sheet number to convert")
 
     if argparser:
         options = parser.parse_args()
@@ -729,34 +870,70 @@ if __name__ == "__main__":
         options.outfile = len(args) > 1 and args[1] or None
 
     if len(options.delimiter) == 1:
-        delimiter = options.delimiter
-    elif options.delimiter == 'tab':
-        delimiter = '\t'
+        pass
+    elif options.delimiter == 'tab' or '\\t':
+        options.delimiter = '\t'
     elif options.delimiter == 'comma':
-        delimiter = ','
+        options.delimiter = ','
     elif options.delimiter[0] == 'x':
-        delimiter = chr(int(options.delimiter[1:]))
+        options.delimiter = chr(int(options.delimiter[1:]))
     else:
-        raise XlsxException("Invalid delimiter")
+        sys.stderr.write("error: invalid delimiter\n")
+        sys.exit(1)
+
+    if options.lineterminator == '\n':
+        pass
+    elif options.lineterminator == '\\n':
+        options.lineterminator = '\n'
+    elif options.lineterminator == '\\r':
+        options.lineterminator = '\r'
+    elif options.lineterminator == '\\r\\n':
+        options.lineterminator = '\r\n'
+    else:
+        sys.stderr.write("error: invalid line terminator\n")
+        sys.exit(1)
+
+    if options.sheetdelimiter == '--------':
+        pass
+    elif options.sheetdelimiter == '\\f':
+        options.sheetdelimiter = '\f'
+    elif options.sheetdelimiter[0] == 'x':
+        options.sheetdelimiter = chr(int(options.sheetdelimiter[1:]))
+    else:
+        sys.stderr.write("error: invalid sheet delimiter\n")
+        sys.exit(1)
 
     kwargs = {
-      'delimiter' : delimiter,
+      'delimiter' : options.delimiter,
       'sheetdelimiter' : options.sheetdelimiter,
       'dateformat' : options.dateformat,
       'skip_empty_lines' : options.skip_empty_lines,
+      'skip_trailing_columns' : options.skip_trailing_columns,
       'escape_strings' : options.escape_strings,
       'hyperlinks' : options.hyperlinks,
-      'cmd' : True,
       'include_sheet_pattern' : options.include_sheet_pattern,
-      'exclude_sheet_pattern' : options.exclude_sheet_pattern
+      'exclude_sheet_pattern' : options.exclude_sheet_pattern,
+      'merge_cells' : options.merge_cells,
+      'outputencoding' : options.outputencoding,
+      'lineterminator' : options.lineterminator,
+      'ignore_formats' : options.ignore_formats
     }
     sheetid = options.sheetid
     if options.all:
         sheetid = 0
 
     outfile = options.outfile or sys.stdout
-    if os.path.isdir(options.infile):
-        convert_recursive(options.infile, sheetid, outfile, kwargs)
-    else:
-        xlsx2csv = Xlsx2csv(options.infile, **kwargs)
-        xlsx2csv.convert(outfile, sheetid)
+    try:
+        if os.path.isdir(options.infile):
+            convert_recursive(options.infile, sheetid, outfile, kwargs)
+        else:
+            xlsx2csv = Xlsx2csv(options.infile, **kwargs)
+            if options.sheetname:
+                sheetid = xlsx2csv.getSheetIdByName(options.sheetname)
+                if not sheetid:
+                    raise XlsxException("Sheet '%s' not found" % options.sheetname)
+            xlsx2csv.convert(outfile, sheetid)
+    except XlsxException:
+        _, e, _ = sys.exc_info()
+        sys.stderr.write(str(e) + "\n")
+        sys.exit(1)
