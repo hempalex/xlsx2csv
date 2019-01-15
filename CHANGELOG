@@ -1,3 +1,39 @@
+version 0.7.4 (2018-Jun-5):
+
+version 0.7.3 (2017-May-20):
+  * Support for "xl/worksheets/worksheet.xml"
+  * Date format "float" leaves value as simple numeric.
+  * bug fixes by Eudes du Rivau
+
+version 0.7.2 (2015-Apr-17):
+  * bug fixes
+
+version 0.7.1 (2015-Feb-10):
+  * more date formats
+  * other fixes
+
+version 0.7 (2014-Jan-28):
+  * hyperlinks support
+
+version 0.6 (2013-Dec-7):
+  * python 2.4 support
+  * python 3.3 support
+  * setuptools
+  * escape \t\r\n characters option
+  * bug fixes
+
+version 
+  * seperate csv files for each sheet (#37)
+  * #38 issue fix
+
+version 0.5 (2013-Jun-6):
+  * Select EOL terminator according to OS (#32)
+  * floating errors (#28)
+  * inlineStr support (#24)
+  * Add man/ directory for manual page (#23)
+  * Misinterpretation of & (#15)
+  and other fixes
+
 version 0.20 (2012-Aug-7)
 
 version 0.19 (2012-May-17):
@@ -40,4 +76,4 @@ version 0.1 (2010-sep-12):
   - thanks to Neil Killeen
 
 version 0.0 (2010-jun-11):
-  * xlsx to csv convertor first release
+  * xlsx to csv converter first release
