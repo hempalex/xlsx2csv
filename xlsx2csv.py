@@ -185,7 +185,13 @@ class Xlsx2csv:
         self.shared_strings = self._parse(SharedStrings, self.content_types.types["shared_strings"])
         self.styles = self._parse(Styles, self.content_types.types["styles"])
         self.workbook = self._parse(Workbook, self.content_types.types["workbook"])
-        self.workbook.relationships = self._parse(Relationships, self.content_types.types["relationships"])
+
+        relationshipsfile = self.content_types.types["relationships"]
+        if self.workbook.appName == 'xl':
+            relationshipsfile = "/xl/_rels/workbook.xml.rels"
+
+        self.workbook.relationships = self._parse(Relationships, relationshipsfile)
+
         if self.options['escape_strings']:
             self.shared_strings.escape_strings()
 
@@ -209,7 +215,7 @@ class Xlsx2csv:
                     os.makedirs(outfile)
                 elif os.path.isfile(outfile):
                     raise OutFileAlreadyExistsException("File " + str(outfile) + " already exists!")
-            for s in self.workbook.sheets:
+            for idx, s in enumerate(self.workbook.sheets):
                 sheetname = s['name']
 
                 # filter sheets by include pattern
@@ -242,7 +248,7 @@ class Xlsx2csv:
                 of = outfile
                 if isinstance(outfile, str):
                     of = os.path.join(outfile, sheetname + '.csv')
-                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and s['id'] > 1:
+                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and idx > 0:
                     of.write(self.options['sheetdelimiter'] + self.options['lineterminator'])
                 self._convert(s['id'], of)
 
@@ -259,7 +265,14 @@ class Xlsx2csv:
             closefile = True
         try:
             writer = csv.writer(outfile, quoting=self.options['quoting'], delimiter=self.options['delimiter'], lineterminator=self.options['lineterminator'])
-            sheetfile = self._filehandle("/xl/worksheets/sheet%i.xml" % sheetid)
+
+            if self.workbook.appName == 'xl':
+                sheetfilename = '/xl/' + self.workbook.relationships.relationships.get("rId%i" % sheetid)['target']
+            else:
+                sheetfilename = "/xl/worksheets/sheet%i.xml" % sheetid
+
+            sheetfile = self._filehandle(sheetfilename)
+
             if not sheetfile:
                 sheetfile = self._filehandle("/xl/worksheets/worksheet%i.xml" % sheetid)
             if not sheetfile and sheetid == 1:
@@ -674,16 +687,19 @@ class Sheet:
         else:
             self.parser.ParseFile(self.filehandle)
 
+    def _decode_hex(self, s):
+        return re.sub("_x([0-9A-F]{4})_", lambda match : unichr(int(match.group(1), 16)), s)
+
     def handleCharData(self, data):
         if self.in_cell_value:
             self.collected_string+= data
             self.data = self.collected_string
             if self.colType == "s": # shared string
-                self.data = self.sharedStrings[int(self.data)]
+                self.data = self._decode_hex(self.sharedStrings[int(self.data)])
             elif self.colType == "b": # boolean
                 self.data = (int(data) == 1 and "TRUE") or (int(data) == 0 and "FALSE") or data
             elif self.colType == "str" or self.colType == "inlineStr":
-                self.data = data
+                self.data = self._decode_hex(data)
             elif self.s_attr:
                 s = int(self.s_attr)
 
