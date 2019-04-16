@@ -267,7 +267,7 @@ class Xlsx2csv:
             writer = csv.writer(outfile, quoting=self.options['quoting'], delimiter=self.options['delimiter'], lineterminator=self.options['lineterminator'])
 
             if self.workbook.appName == 'xl':
-                sheetfilename = '/xl/' + self.workbook.relationships.relationships.get("rId%i" % sheetid)['target']
+                sheetfilename = '/xl/' + str(self.workbook.relationships.relationships.get("rId%i" % sheetid)['target'], 'utf-8')
             else:
                 sheetfilename = "/xl/worksheets/sheet%i.xml" % sheetid
 
