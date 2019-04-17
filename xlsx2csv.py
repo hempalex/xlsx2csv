@@ -220,7 +220,7 @@ class Xlsx2csv:
                     os.makedirs(outfile)
                 elif os.path.isfile(outfile):
                     raise OutFileAlreadyExistsException("File " + str(outfile) + " already exists!")
-            for idx, s in self.workbook.sheets:
+            for s in self.workbook.sheets:
                 sheetname = s['name']
 
                 # filter sheets by include pattern
@@ -253,7 +253,7 @@ class Xlsx2csv:
                 of = outfile
                 if isinstance(outfile, str):
                     of = os.path.join(outfile, sheetname + '.csv')
-                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and idx > 0:
+                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and s['index'] > 0:
                     of.write(self.options['sheetdelimiter'] + self.options['lineterminator'])
                 self._convert(s['index'], of)
 
@@ -734,7 +734,7 @@ class Sheet:
             self.parser.ParseFile(self.filehandle)
 
     def _decode_hex(self, s):
-        return re.sub("_x([0-9A-F]{4})_", lambda match : unichr(int(match.group(1), 16)), s)
+        return re.sub("_x([0-9A-F]{4})_", lambda match : chr(int(match.group(1), 16)), s)
 
     def handleCharData(self, data):
         if self.in_cell_value:
