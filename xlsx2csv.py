@@ -16,8 +16,8 @@
 #   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
 #   GNU General Public License for more details.
 #
-#	You should have received a copy of the GNU General Public License
-#	along with this program. If not, see <http://www.gnu.org/licenses/>.
+#   You should have received a copy of the GNU General Public License
+#   along with this program. If not, see <http://www.gnu.org/licenses/>.
 from __future__ import print_function
 
 __author__ = "Dilshod Temirkhodjaev <tdilshod@gmail.com>"
@@ -166,6 +166,7 @@ class Xlsx2csv:
        hyperlinks - include hyperlinks
        include_sheet_pattern - only include sheets named matching given pattern
        exclude_sheet_pattern - exclude sheets named matching given pattern
+       exclude_hidden_sheets - exclude hidden sheets
     """
 
     def __init__(self, xlsxfile, **options):
@@ -201,8 +202,13 @@ class Xlsx2csv:
         self.shared_strings = self._parse(SharedStrings, self.content_types.types["shared_strings"])
         self.styles = self._parse(Styles, self.content_types.types["styles"])
         self.workbook = self._parse(Workbook, self.content_types.types["workbook"])
+
+        if self.content_types.types['relationships'] == None:
+            return
+
         workbook_relationships = list(filter(lambda r: "book" in r, self.content_types.types["relationships"]))[0]
         self.workbook.relationships = self._parse(Relationships, workbook_relationships)
+
         if self.options['no_line_breaks']:
             self.shared_strings.replace_line_breaks()
         elif self.options['escape_strings']:
@@ -270,7 +276,7 @@ class Xlsx2csv:
                 of = outfile
                 if isinstance(outfile, str):
                     of = os.path.join(outfile, sheetname + '.csv')
-                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and s['index'] > 0:
+                elif self.options['sheetdelimiter'] and len(self.options['sheetdelimiter']) and s['index'] > 1:
                     of.write(self.options['sheetdelimiter'] + self.options['lineterminator'])
                 self._convert(s['index'], of)
 
@@ -798,6 +804,7 @@ class Sheet:
                 s = int(self.s_attr)
 
                 # get cell format
+                format_str = "general"
                 xfs_numfmt = None
                 if s < len(self.styles.cellXfs):
                     xfs_numfmt = self.styles.cellXfs[s]
@@ -811,6 +818,7 @@ class Sheet:
                     eprint("unknown format %s at %d" % (format_str, xfs_numfmt))
                     return
 
+                format_type = None
                 if format_str in FORMATS:
                     format_type = FORMATS[format_str]
                 elif re.match("^\d+(\.\d+)?$", self.data) and re.match(".*[hsmdyY]", format_str) and not re.match(
@@ -825,6 +833,9 @@ class Sheet:
                     format_type = "float"
                 if format_type == 'date' and self.dateformat == 'float':
                     format_type = "float"
+                if format_type and not format_type in self.ignore_formats:
+                    if self.data == "#N/A" or self.data == "#VALUE!":
+                        return
             elif self.colType == "n":
                 format_type = "float"
 
@@ -891,7 +902,7 @@ class Sheet:
                     (name == 'v' or name == 'is') or (has_namespace and (name.endswith(':v') or name.endswith(':is')))):
             self.in_cell_value = True
             self.collected_string = ""
-        elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and ('r' in attrs) and not ('hidden' in attrs and attrs['hidden'] == '1'):
+        elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and ('r' in attrs):
             self.rowNum = attrs['r']
             self.in_row = True
             self.colIndex = 0
@@ -931,12 +942,15 @@ class Sheet:
                 hyperlink = self.hyperlinks.get(self.cellId)
                 if hyperlink:
                     d = "<a href='" + hyperlink + "'>" + d + "</a>"
-            if self.colNum + self.rowNum in self.mergeCells.keys():
-                if 'copyFrom' in self.mergeCells[self.colNum + self.rowNum].keys() and \
-                                self.mergeCells[self.colNum + self.rowNum]['copyFrom'] == self.colNum + self.rowNum:
-                    self.mergeCells[self.colNum + self.rowNum]['value'] = d
-                else:
-                    d = self.mergeCells[self.mergeCells[self.colNum + self.rowNum]['copyFrom']]['value']
+
+            c = self.colNum + self.rowNum # coord of merged cells
+            if c in self.mergeCells.keys():
+                if 'copyFrom' in self.mergeCells[c].keys():
+                    copyFrom = self.mergeCells[c]['copyFrom']
+                    if c == copyFrom:
+                        self.mergeCells[c]['value'] = d
+                    else:
+                        d = self.mergeCells[copyFrom].get('value', '')
 
             self.columns[t - 1 + self.colIndex] = d
             self.in_cell = False
@@ -1204,7 +1218,3 @@ if __name__ == "__main__":
         _, e, _ = sys.exc_info()
         sys.stderr.write(str(e) + "\n")
         sys.exit(1)
-
-
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
