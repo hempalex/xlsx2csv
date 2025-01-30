@@ -6,10 +6,10 @@
 Converts xlsx files to csv format.
 Handles large XLSX files. Fast and easy to use.
 
-## Supported python versions:
+## Tested(supported) python versions:
  - 2.4
  - 2.7
- - 3.4
+ - 3.4 to 3.13
 
 ## Installation:
 
@@ -38,7 +38,7 @@ pip install xlsx2csv
 ```
 **positional arguments:**
 ```
-  xlsxfile              xlsx file path
+  xlsxfile              xlsx file path, use '-' to read from STDIN
   outfile               output csv file path, or directory if -s 0 is specified
 ```
 **optional arguments:**
@@ -81,6 +81,12 @@ pip install xlsx2csv
   -m, --merge-cells     merge cells
 ```
 
+Usage with folder containing multiple `xlxs` files:
+```
+    python xlsx2csv.py /path/to/input/dir /path/to/output/dir
+```
+will output each file in the input dir converted to `.csv` in the output dir. If omitting the output dir it will output the converted files in the input dir
+
 Usage from within Python:
 ```
   from xlsx2csv import Xlsx2csv
@@ -90,6 +96,10 @@ Usage from within Python:
 Expat SAX parser used for xml parsing.
 
 See alternatives:
+
+Perl:
+
+https://metacpan.org/dist/Spreadsheet-Read/view/scripts/xlsx2csv
 
 Bash:
 http://kirk.webfinish.com/?p=91
@@ -105,15 +115,10 @@ Java:
 http://poi.apache.org/
 
 
-All programs in this directory and subdirectories are published under
-license GNU GPL version 2 or (at your option) any later version. For
-more information, see COPYING or visit <https://www.gnu.org/licenses/old-licenses/gpl-2.0.html>.
-
-
 ## Meta
 
   Dilshod Temirkhdojaev – tdilshod@gmail.com
 
-Distributed under the GNU GENERAL PUBLIC LICENSE. See ``LICENSE`` for more information.
+Distributed under the MIT LICENSE. See ``LICENSE`` for more information.
 
 [https://github.com/dilshod](https://github.com/dilshod)

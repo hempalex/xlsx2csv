@@ -1,31 +1,34 @@
 #!/usr/bin/env python
 #
-#   Copyright information
+# The MIT License
 #
-#   Copyright (C) 2010-2018 Dilshod Temirkhodjaev <tdilshod@gmail.com>
+# Copyright (c) 2025 Dilshod Temirkhodjaev
 #
-#   License
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
 #
-#   This program is free software; you can redistribute it and/or modify
-#   it under the terms of the GNU General Public License as published by
-#   the Free Software Foundation; either version 2 of the License, or
-#   (at your option) any later version.
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
 #
-#   This program is distributed in the hope that it will be useful,
-#   but WITHOUT ANY WARRANTY; without even the implied warranty of
-#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-#   GNU General Public License for more details.
-#
-#   You should have received a copy of the GNU General Public License
-#   along with this program. If not, see <http://www.gnu.org/licenses/>.
-from __future__ import print_function
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
 
 __author__ = "Dilshod Temirkhodjaev <tdilshod@gmail.com>"
-__license__ = "GPL-2+"
-__version__ = "0.7.9"
+__license__ = "MIT"
+__version__ = "0.8.4"
 
-import csv, datetime, zipfile, string, sys, os, re, signal
+import csv, datetime, zipfile, sys, os, re, signal, io
 import xml.parsers.expat
+from decimal import Decimal
 from xml.dom import minidom
 
 try:
@@ -117,19 +120,19 @@ STANDARD_FORMATS = {
     48: '##0.0e+0',
     49: '@',
 }
-CONTENT_TYPES = {
+EXCEL_ERROR_VALUES = [
+    '#N/A', '#REF!', '#DIV/0!', '#CALC!', '#NAME!', '#NULL!', '#NUM!', '#SPILL!', '#VALUE!'
+]
+CONTENT_TYPES = set((
     'shared_strings',
     'styles',
     'workbook',
     'worksheet',
     'relationships',
-}
+))
 
 DEFAULT_APP_PATH = "/xl"
 DEFAULT_WORKBOOK_PATH = DEFAULT_APP_PATH + "/workbook.xml"
-
-def eprint(*args, **kwargs):
-    print(*args, file=sys.stderr, **kwargs)
 
 class XlsxException(Exception):
     pass
@@ -144,6 +147,10 @@ class SheetNotFoundException(XlsxException):
 
 
 class OutFileAlreadyExistsException(XlsxException):
+    pass
+
+
+class XlsxValueError(XlsxException):
     pass
 
 
@@ -167,6 +174,7 @@ class Xlsx2csv:
        include_sheet_pattern - only include sheets named matching given pattern
        exclude_sheet_pattern - exclude sheets named matching given pattern
        exclude_hidden_sheets - exclude hidden sheets
+       skip_hidden_rows - skip hidden rows
     """
 
     def __init__(self, xlsxfile, **options):
@@ -189,34 +197,46 @@ class Xlsx2csv:
         options.setdefault("ignore_formats", [''])
         options.setdefault("lineterminator", "\n")
         options.setdefault("outputencoding", "utf-8")
+        options.setdefault("skip_hidden_rows", True)
 
         self.options = options
+        self.py3 = sys.version_info[0] == 3
+        self.ziphandle = None
+
+        xlsxinputfile = None
+        if xlsxfile == "-" and self.py3:
+            xlsxfile = "STDIN"
+            if sys.stdin.buffer.seekable():
+                xlsxinputfile = sys.stdin.buffer
+            else:
+                xlsxinputfile = io.BytesIO(sys.stdin.buffer.read())
+        elif xlsxfile == "-" and not self.py3:
+            raise ValueError("The - notation for STDIN is not supported for python2")
+        else:
+            xlsxinputfile = xlsxfile
+
         try:
-            self.ziphandle = zipfile.ZipFile(xlsxfile)
+            self.ziphandle = zipfile.ZipFile(xlsxinputfile)
         except (zipfile.BadZipfile, IOError):
             raise InvalidXlsxFileException("Invalid xlsx file: " + str(xlsxfile))
 
-        self.py3 = sys.version_info[0] == 3
 
         self.content_types = self._parse(ContentTypes, "/[Content_Types].xml")
         self.shared_strings = self._parse(SharedStrings, self.content_types.types["shared_strings"])
         self.styles = self._parse(Styles, self.content_types.types["styles"])
         self.workbook = self._parse(Workbook, self.content_types.types["workbook"])
-
-        if self.content_types.types['relationships'] == None:
-            return
-
-        workbook_relationships = list(filter(lambda r: "book" in r, self.content_types.types["relationships"]))[0]
-        self.workbook.relationships = self._parse(Relationships, workbook_relationships)
-
-        if self.options['no_line_breaks']:
-            self.shared_strings.replace_line_breaks()
-        elif self.options['escape_strings']:
+        workbook_relationships = list(filter(lambda r: "book" in r, self.content_types.types["relationships"]))
+        if len(workbook_relationships) > 0:
+            self.workbook.relationships = self._parse(Relationships, workbook_relationships[0])
+        else:
+            self.workbook.relationships = Relationships()
+        if self.options['escape_strings']:
             self.shared_strings.escape_strings()
 
     def __del__(self):
-        # make sure to close zip file, ziphandler does have a close() method
-        self.ziphandle.close()
+        if self.ziphandle:
+            # make sure to close zip file
+            self.ziphandle.close()
 
     def getSheetIdByName(self, name):
         for s in self.workbook.sheets:
@@ -238,6 +258,11 @@ class Xlsx2csv:
                     os.makedirs(outfile)
                 elif os.path.isfile(outfile):
                     raise OutFileAlreadyExistsException("File " + str(outfile) + " already exists!")
+            elif hasattr(outfile, "open"):
+                if outfile.exists():
+                    raise OutFileAlreadyExistsException("File " + str(outfile) + " already exists!")
+                outfile = outfile.open("w+", encoding=self.options['outputencoding'], newline="")
+
             for s in self.workbook.sheets:
                 sheetname = s['name']
                 sheetstate = s['state']
@@ -288,17 +313,19 @@ class Xlsx2csv:
             elif sys.version_info[0] == 3:
                 outfile = open(outfile, 'w+', encoding=self.options['outputencoding'], newline="")
             else:
-                sys.stderr.write("error: version of your python is not supported: " + str(sys.version_info) + "\n")
-                sys.exit(1)
+                raise XlsxException("error: version of your python is not supported: " + str(sys.version_info) + "\n")
             closefile = True
+        elif hasattr(outfile, "open"):
+            outfile = outfile.open("w+", encoding=self.options['outputencoding'], newline="")
+            closefile = True
+
         try:
             writer = csv.writer(outfile, quoting=self.options['quoting'], delimiter=self.options['delimiter'],
                                 lineterminator=self.options['lineterminator'])
 
             sheets_filtered = list(filter(lambda s: s['index'] == sheet_index, self.workbook.sheets))
             if len(sheets_filtered) == 0:
-                eprint("Sheet with index %i not found or can't be handled" % sheet_index)
-                return 1
+                raise XlsxValueError("Sheet with index %i not found or can't be handled" % sheet_index)
 
             sheet_path = None
             # using sheet relation information
@@ -347,10 +374,12 @@ class Xlsx2csv:
                 sheet.set_merge_cells(self.options['merge_cells'])
                 sheet.set_scifloat(self.options['scifloat'])
                 sheet.set_ignore_formats(self.options['ignore_formats'])
+                sheet.set_skip_hidden_rows(self.options['skip_hidden_rows'])
+                sheet.set_no_line_breaks(self.options['no_line_breaks'])
                 if self.options['escape_strings'] and sheet.filedata:
                     sheet.filedata = re.sub(r"(<v>[^<>]+)&#10;([^<>]+</v>)", r"\1\\n\2",
                                             re.sub(r"(<v>[^<>]+)&#9;([^<>]+</v>)", r"\1\\t\2",
-                                                   re.sub(r"(<v>[^<>]+)&#13;([^<>]+</v>)", r"\1\\r\2", sheet.filedata)))
+                                                   re.sub(r"(<v>[^<>]+)&#13;([^<>]+</v>)", r"\1\\r\2", sheet.filedata.decode())))
                 sheet.to_csv(writer)
             finally:
                 sheet_file.close()
@@ -655,6 +684,8 @@ class Sheet:
         self.hyperlinks = {}
         self.mergeCells = {}
         self.ignore_formats = []
+        self.skip_hidden_rows = False
+        self.no_line_breaks = False
 
         self.colIndex = 0
         self.colNum = ""
@@ -682,6 +713,12 @@ class Sheet:
     def set_ignore_formats(self, ignore_formats):
         self.ignore_formats = ignore_formats
 
+    def set_skip_hidden_rows(self, skip_hidden_rows):
+        self.skip_hidden_rows = skip_hidden_rows
+
+    def set_no_line_breaks(self, no_line_breaks):
+        self.no_line_breaks = no_line_breaks
+
     def set_merge_cells(self, mergecells):
         if not mergecells:
             return
@@ -707,6 +744,7 @@ class Sheet:
         # parse hyperlinks
         doc = minidom.parseString(worksheet + data + "</worksheet>").firstChild
 
+        cellReg = re.compile("([a-zA-Z]+)([0-9]+)")
         if doc.namespaceURI:
             mergeCells = doc.getElementsByTagNameNS(doc.namespaceURI, "mergeCell")
         else:
@@ -718,8 +756,9 @@ class Sheet:
                 rng = rangeStr.split(":")
                 if len(rng) > 1:
                     for cell in self._range(rangeStr):
-                        self.mergeCells[cell] = {}
-                        self.mergeCells[cell]['copyFrom'] = rng[0]
+                        if  cellReg.match(cell)[1] == cellReg.match(rng[0])[1]: # only vertical merge then character range are equal
+                            self.mergeCells[cell] = {}
+                            self.mergeCells[cell]['copyFrom'] = rng[0]
 
     def set_scifloat(self, scifloat):
         self.scifloat = scifloat
@@ -784,13 +823,11 @@ class Sheet:
 
     def _decode_hex(self, s):
         return re.sub("_x([0-9A-F]{4})_", lambda match : chr(int(match.group(1), 16)), s)
-
     def handleCharData(self, data):
         if self.in_cell_value:
             format_type = None
             format_str = "general"
-            self.collected_string += data
-            self.data = self.collected_string
+            self.data += data
             if self.colType == "s":  # shared string
                 format_type = "string"
                 self.data = self._decode_hex(self.sharedStrings[int(self.data)])
@@ -799,7 +836,6 @@ class Sheet:
                 self.data = (int(data) == 1 and "TRUE") or (int(data) == 0 and "FALSE") or data
             elif self.colType == "str" or self.colType == "inlineStr":
                 format_type = "string"
-                self.data = self._decode_hex(data)
             elif self.s_attr:
                 s = int(self.s_attr)
 
@@ -808,38 +844,33 @@ class Sheet:
                 xfs_numfmt = None
                 if s < len(self.styles.cellXfs):
                     xfs_numfmt = self.styles.cellXfs[s]
-                if xfs_numfmt in self.styles.numFmts:
+                if xfs_numfmt in self.styles.numFmts and self.styles.numFmts[xfs_numfmt]:
                     format_str = self.styles.numFmts[xfs_numfmt]
                 elif xfs_numfmt in STANDARD_FORMATS:
                     format_str = STANDARD_FORMATS[xfs_numfmt]
 
                 # get format type
                 if not format_str:
-                    eprint("unknown format %s at %d" % (format_str, xfs_numfmt))
-                    return
+                    raise XlsxValueError("unknown format %s at %d" % (format_str, xfs_numfmt))
 
-                format_type = None
                 if format_str in FORMATS:
                     format_type = FORMATS[format_str]
-                elif re.match("^\d+(\.\d+)?$", self.data) and re.match(".*[hsmdyY]", format_str) and not re.match(
-                        '.*\[.*[dmhys].*\]', format_str):
+                elif re.match(r"^\d+(\.\d+)?$", self.data) and re.match(".*[hsmdyY]", format_str) and not re.match(
+                        r".*\[.*[dmhys].*\]", format_str):
                     # it must be date format
                     if float(self.data) < 1:
                         format_type = "time"
                     else:
                         format_type = "date"
-                elif re.match("^-?\d+(.\d+)?$", self.data) or (
-                            self.scifloat and re.match("^-?\d+(.\d+)?([eE]-?\d+)?$", self.data)):
+                elif re.match(r"^-?\d+(.\d+)?$", self.data) or (
+                            self.scifloat and re.match(r"^-?\d+(.\d+)?([eE]-?\d+)?$", self.data)):
                     format_type = "float"
                 if format_type == 'date' and self.dateformat == 'float':
                     format_type = "float"
-                if format_type and not format_type in self.ignore_formats:
-                    if self.data == "#N/A" or self.data == "#VALUE!":
-                        return
             elif self.colType == "n":
                 format_type = "float"
 
-            if format_type and not format_type in self.ignore_formats:
+            if format_type and not format_type in self.ignore_formats and self.data not in EXCEL_ERROR_VALUES:
                 try:
                     if format_type == 'date':  # date/time
                         if self.workbook.date1904:
@@ -852,7 +883,7 @@ class Sheet:
                         else:
                             # ignore ";@", don't know what does it mean right now
                             # ignore "[$-409], [$-f409], [$-16001]" and similar format codes
-                            dateformat = re.sub(r"\[\$\-[A-z0-9]*\]", "", format_str, 1) \
+                            dateformat = re.sub(r"\[\$\-[A-z0-9]*\]", "", format_str, count=1) \
                                 .replace(";@", "").replace("yyyy", "%Y").replace("yy", "%y") \
                                 .replace("hh:mm", "%H:%M").replace("h", "%I").replace("%H%H", "%H") \
                                 .replace("ss", "%S").replace("dddd", "d").replace("dd", "d").replace("d", "%d") \
@@ -863,27 +894,31 @@ class Sheet:
                         t = int(round((float(self.data) % 1) * 24 * 60 * 60, 6))  # it should be in seconds
                         d = datetime.time(int((t // 3600) % 24), int((t // 60) % 60), int(t % 60))
                         self.data = d.strftime(self.timeformat)
-                    elif format_type == 'float' and ('E' in self.data or 'e' in self.data):
-                        self.data = str(self.floatformat or '%f') % float(self.data)
-                    # if cell is general, be aggressive about stripping any trailing 0s, decimal points, etc.
-                    elif format_type == 'float' and format_str == 'general':
-                        self.data = ("%f" % (float(self.data))).rstrip('0').rstrip('.')
-                    elif format_type == 'float' and format_str[0:3] == '0.0':
-                        if self.floatformat:
-                            self.data = str(self.floatformat) % float(self.data)
-                        else:
-                            L = len(format_str.split(".")[1])
-                            if '%' in format_str:
-                                L += 1
-                            self.data = ("%." + str(L) + "f") % float(self.data)
                     elif format_type == 'float':
-                        # unsupported float formatting
-                        self.data = ("%f" % (float(self.data))).rstrip('0').rstrip('.')
+                        data = float(self.data)
+                        if not self.floatformat and data.is_integer():
+                            # repr(float(...)) - workaround to correctly round precision for floats
+                            # repr gives same result on python 2 and 3, while str is different on python 2
+                            self.data = "%i" % Decimal(repr(float(self.data)))
+                        elif ('E' in self.data or 'e' in self.data):
+                            self.data = str(self.floatformat or '%f') % data
+                        # if cell is general, be aggressive about stripping any trailing 0s, decimal points, etc.
+                        elif format_str == 'general':
+                            self.data = ("%f" % data).rstrip('0').rstrip('.')
+                        elif format_str[0:3] == '0.0':
+                            if self.floatformat:
+                                self.data = str(self.floatformat) % data
+                            else:
+                                L = len(format_str.split(".")[1])
+                                if '%' in format_str:
+                                    L += 1
+                                self.data = ("%." + str(L) + "f") % data
+                        else:
+                            # unsupported float formatting
+                            self.data = ("%f" % data).rstrip('0').rstrip('.')
 
                 except (ValueError, OverflowError):  # this catch must be removed, it's hiding potential problems
-                    eprint("Error: potential invalid date format.")
-                    # invalid date format
-                    pass
+                    raise XlsxValueError("Error: potential invalid date format.")
 
     def handleStartElement(self, name, attrs):
         has_namespace = name.find(":") > 0
@@ -898,11 +933,9 @@ class Sheet:
                 self.colIndex += 1
             self.data = ""
             self.in_cell = True
-        elif self.in_cell and (
-                    (name == 'v' or name == 'is') or (has_namespace and (name.endswith(':v') or name.endswith(':is')))):
+        elif self.in_cell and ((name == 'v' or name == 't') or (has_namespace and name.endswith(':v'))):
             self.in_cell_value = True
-            self.collected_string = ""
-        elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and ('r' in attrs):
+        elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and ('r' in attrs) and not (self.skip_hidden_rows and 'hidden' in attrs and attrs['hidden'] == '1'):
             self.rowNum = attrs['r']
             self.in_row = True
             self.colIndex = 0
@@ -911,18 +944,15 @@ class Sheet:
             self.spans = None
             if 'spans' in attrs:
                 self.spans = [int(i) for i in attrs['spans'].split(" ")[-1].split(":")]
-        elif name == 't':
-            # reset collected string
-            self.collected_string = ""
 
         elif name == 'sheetData' or (has_namespace and name.endswith(':sheetData')):
             self.in_sheet = True
         elif name == 'dimension':
             rng = attrs.get("ref").split(":")
             if len(rng) > 1:
-                start = re.match("^([A-Z]+)(\d+)$", rng[0])
+                start = re.match(r"^([A-Z]+)(\d+)$", rng[0])
                 if (start):
-                    end = re.match("^([A-Z]+)(\d+)$", rng[1])
+                    end = re.match(r"^([A-Z]+)(\d+)$", rng[1])
                     startCol = start.group(1)
                     endCol = end.group(1)
                     self.columns_count = 0
@@ -931,8 +961,7 @@ class Sheet:
 
     def handleEndElement(self, name):
         has_namespace = name.find(":") > 0
-        if self.in_cell and ((name == 'v' or name == 'is' or name == 't') or (
-                    has_namespace and (name.endswith(':v') or name.endswith(':is')))):
+        if self.in_cell and ((name == 'v' or name == 't') or (has_namespace and name.endswith(':v'))):
             self.in_cell_value = False
         elif self.in_cell and (name == 'c' or (has_namespace and name.endswith(':c'))):
             t = 0
@@ -951,6 +980,9 @@ class Sheet:
                         self.mergeCells[c]['value'] = d
                     else:
                         d = self.mergeCells[copyFrom].get('value', '')
+                        #d = c + "<-" + copyFrom
+            if self.no_line_breaks:
+              d = d.replace("\r", " ").replace("\n", " ").replace("\t", " ")
 
             self.columns[t - 1 + self.colIndex] = d
             self.in_cell = False
@@ -967,7 +999,7 @@ class Sheet:
                             val = val.encode("utf-8")
                         d.append(val)
                 else:
-                    d = [""] * (max(self.columns.keys()) + 1)
+                    d = [""] * (max(self.columns_count, max(self.columns.keys()) + 1))
                     for k in self.columns.keys():
                         val = self.columns[k]
                         if not self.py3:
@@ -977,6 +1009,8 @@ class Sheet:
                     l = self.spans[1]
                     if len(d) < l:
                         d += (l - len(d)) * ['']
+                if self.columns_count < 0:
+                    self.columns_count = len(d)
 
                 # write empty lines
                 if not self.skip_empty_lines:
@@ -1010,8 +1044,8 @@ class Sheet:
         if len(rng) == 1:
             yield rangeStr
         else:
-            start = re.match("^([A-Z]+)(\d+)$", rng[0])
-            end = re.match("^([A-Z]+)(\d+)$", rng[1])
+            start = re.match(r"^([A-Z]+)(\d+)$", rng[0])
+            end = re.match(r"^([A-Z]+)(\d+)$", rng[1])
             if not start or not end:
                 return
             startCol = start.group(1)
@@ -1039,17 +1073,21 @@ def convert_recursive(path, sheetid, outfile, kwargs):
             convert_recursive(fullpath, sheetid, outfile, kwargs)
         else:
             outfilepath = outfile
-            if len(outfilepath) == 0 and fullpath.lower().endswith(".xlsx"):
+            if isinstance(outfilepath, type(sys.stdout)):
+                outfilepath = fullpath[:-4] + 'csv'
+            elif os.path.isdir(outfilepath):
+                outfilepath = os.path.join(outfilepath, name[:-4] + 'csv')
+            elif len(outfilepath) == 0 and fullpath.lower().endswith(".xlsx"):
                 outfilepath = fullpath[:-4] + 'csv'
 
             print("Converting %s to %s" % (fullpath, outfilepath))
             try:
                 Xlsx2csv(fullpath, **kwargs).convert(outfilepath, sheetid)
             except zipfile.BadZipfile:
-                print("File %s is not a zip file" % fullpath)
+                raise InvalidXlsxFileException("File %s is not a zip file" % fullpath)
 
 
-if __name__ == "__main__":
+def main():
     try:
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
         signal.signal(signal.SIGINT, signal.SIG_DFL)
@@ -1058,7 +1096,7 @@ if __name__ == "__main__":
 
     if "ArgumentParser" in globals():
         parser = ArgumentParser(description="xlsx to csv converter")
-        parser.add_argument('infile', metavar='xlsxfile', help="xlsx file path")
+        parser.add_argument('infile', metavar='xlsxfile', help="xlsx file path, use '-' to read from STDIN")
         parser.add_argument('outfile', metavar='outfile', nargs='?', help="output csv file path")
         parser.add_argument('-v', '--version', action='version', version=__version__)
         nargs_plus = "+"
@@ -1118,6 +1156,8 @@ if __name__ == "__main__":
                         help="quoting - fields quoting in csv, 'none' 'minimal' 'nonnumeric' or 'all' (default: minimal)")
     parser.add_argument("-s", "--sheet", dest="sheetid", default=1, type=inttype,
                         help="sheet number to convert")
+    parser.add_argument("--include-hidden-rows", dest="include_hidden_rows", default=False, action="store_true",
+                        help="include hidden rows")
 
     if argparser:
         options = parser.parse_args()
@@ -1125,8 +1165,7 @@ if __name__ == "__main__":
         (options, args) = parser.parse_args()
         if len(args) < 1:
             parser.print_usage()
-            sys.stderr.write("error: too few arguments" + os.linesep)
-            sys.exit(1)
+            sys.exit("error: too few arguments" + os.linesep)
         options.infile = args[0]
         options.outfile = len(args) > 1 and args[1] or None
 
@@ -1138,9 +1177,10 @@ if __name__ == "__main__":
         options.delimiter = ','
     elif options.delimiter[0] == 'x':
         options.delimiter = chr(int(options.delimiter[1:]))
+    elif options.delimiter == 'fs' or options.delimiter == 'FS':
+        options.delimiter = chr(28)
     else:
-        sys.stderr.write("error: invalid delimiter\n")
-        sys.exit(1)
+        sys.exit("error: invalid delimiter\n")
 
     if options.quoting == 'none':
         options.quoting = csv.QUOTE_NONE
@@ -1151,8 +1191,7 @@ if __name__ == "__main__":
     elif options.quoting == 'all':
         options.quoting = csv.QUOTE_ALL
     else:
-        sys.stderr.write("error: invalid quoting\n")
-        sys.exit(1)
+        sys.exit("error: invalid quoting\n")
 
     if options.lineterminator == '\n':
         pass
@@ -1163,8 +1202,7 @@ if __name__ == "__main__":
     elif options.lineterminator == '\\r\\n':
         options.lineterminator = '\r\n'
     else:
-        sys.stderr.write("error: invalid line terminator\n")
-        sys.exit(1)
+        sys.exit("error: invalid line terminator\n")
 
     if options.sheetdelimiter == '--------':
         pass
@@ -1175,8 +1213,7 @@ if __name__ == "__main__":
     elif options.sheetdelimiter[0] == 'x':
         options.sheetdelimiter = chr(int(options.sheetdelimiter[1:]))
     else:
-        sys.stderr.write("error: invalid sheet delimiter\n")
-        sys.exit(1)
+        sys.exit("error: invalid sheet delimiter\n")
 
     kwargs = {
         'delimiter': options.delimiter,
@@ -1197,7 +1234,8 @@ if __name__ == "__main__":
         'merge_cells': options.merge_cells,
         'outputencoding': options.outputencoding,
         'lineterminator': options.lineterminator,
-        'ignore_formats': options.ignore_formats
+        'ignore_formats': options.ignore_formats,
+        'skip_hidden_rows': not options.include_hidden_rows
     }
     sheetid = options.sheetid
     if options.all:
@@ -1207,14 +1245,19 @@ if __name__ == "__main__":
     try:
         if os.path.isdir(options.infile):
             convert_recursive(options.infile, sheetid, outfile, kwargs)
+        elif not os.path.exists(options.infile) and options.infile != "-":
+            raise InvalidXlsxFileException("Input file not found!")
         else:
             xlsx2csv = Xlsx2csv(options.infile, **kwargs)
             if options.sheetname:
                 sheetid = xlsx2csv.getSheetIdByName(options.sheetname)
                 if not sheetid:
-                    raise XlsxException("Sheet '%s' not found" % options.sheetname)
+                    sys.exit("Sheet '%s' not found" % options.sheetname)
             xlsx2csv.convert(outfile, sheetid)
     except XlsxException:
         _, e, _ = sys.exc_info()
-        sys.stderr.write(str(e) + "\n")
-        sys.exit(1)
+        sys.exit(str(e) + "\n")
+
+
+if __name__ == "__main__":
+    main()
