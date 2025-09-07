@@ -662,7 +662,7 @@ class Sheet:
 
         self.columns = {}
         self.lastRowNum = 0
-        self.rowNum = None
+        self.rowNum = "0"
         self.colType = None
         self.cellId = None
         self.s_attr = None
@@ -935,8 +935,11 @@ class Sheet:
             self.in_cell = True
         elif self.in_cell and ((name == 'v' or name == 't') or (has_namespace and name.endswith(':v'))):
             self.in_cell_value = True
-        elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and ('r' in attrs) and not (self.skip_hidden_rows and 'hidden' in attrs and attrs['hidden'] == '1'):
-            self.rowNum = attrs['r']
+        elif self.in_sheet and (name == 'row' or (has_namespace and name.endswith(':row'))) and not (self.skip_hidden_rows and 'hidden' in attrs and attrs['hidden'] == '1'):
+            if 'r' in attrs:
+                self.rowNum = attrs['r']
+            else:
+                self.rowNum = str(int(self.rowNum) + 1)
             self.in_row = True
             self.colIndex = 0
             self.colNum = ""
